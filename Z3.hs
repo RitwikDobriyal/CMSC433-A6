@@ -108,6 +108,29 @@ Check SAT
     that it is a tautology that holds in all contexts.
 
 -}
+
+
+{-
+  MY NOTES FOR THE IMPLEMENTATION:
+
+  - based off of the z3 lecture, at a high level:
+    1) i need to calculate the set of variables or constants i have; without this,
+        z3 tweaks out 
+    2) translate the predicate to a string -> refer to the pretty printer file
+        (Printer.hs); if i use a type class (like PP in Printer.hs), and then
+          translate everything (like uops like in Printer.hs), it will be way easier
+          than manually doing all this
+    3) try to use the Data.Set api from standard library; i can use anything;
+        what i should do is add all variables/constants i see into a set,
+        recursively use stuff like empty and insert and so on, and then iterate
+        using a map or fold function (over the set)
+  - it should not be that long; code shouldn't be like >80 lines of code so 
+      i should be able to do this in a few hours, the implementation should
+      not be that hard i just need to figure out how to be clever; i need to
+      make sure that i basically "negate" the verification condition and 
+      assert the negation as well
+
+-}
 module Z3 where
 
 import Syntax
@@ -119,9 +142,74 @@ import System.Process(readProcessWithExitCode)
 import Data.Set(Set)
 import qualified Data.Set as Set
 
+-- this is the type class i need here; i go from a generic to a doc, just like Printer.hs
+class ToZ3 a where
+ toZ3Doc :: a -> Doc
 
+-- now i need to get variables and constants recursively... 
+getVars :: Predicate -> Set Name
+getVars (Forall [] e) = getVarsExp e  -- just need to deal with empty 
+getVars (PredOp p1 _ p2) = Set.union (getVars p1) (getVars p2) -- combine the two
+getVars _ = Set.empty -- need to make sure i have the case where there's an empty set
+-- making sure i deal with expressions instead of just predicates
+getVarsExp :: Expression -> Set Name
+getVarsExp (Val _) = Set.empty
+getVarsExp (Var (Name n)) = Set.singleton n
+getVarsExp (Op1 _ e) = getVarsExp e
+getVarsExp (Op2 e1 _ e2) = Set.union (getVarsExp e1) (getVarsExp e2)
+getVarsExp _ = Set.empty  -- again empty set, i don't care about arrays
+
+-- now convert the expressions to z3
+instance ToZ3 Expression where
+ toZ3Doc (Val (IntVal i)) = PP.integer (toInteger i)
+ toZ3Doc (Val (BoolVal b)) = PP.text (if b then "true" else "false")
+ toZ3Doc (Var (Name n)) = PP.text n
+ toZ3Doc (Op1 op e) = PP.parens $ toZ3Doc op <+> toZ3Doc e
+ toZ3Doc (Op2 e1 op e2) = PP.parens $ toZ3Doc op <+> toZ3Doc e1 <+> toZ3Doc e2
+ toZ3Doc _ = error "array not supported"
+
+-- also convert predicates to z3
+instance ToZ3 Predicate where
+ toZ3Doc (Forall [] e) = toZ3Doc e
+ toZ3Doc (PredOp p1 op p2) = PP.parens $ toZ3Doc op <+> toZ3Doc p1 <+> toZ3Doc p2
+ toZ3Doc _ = error "only empty quantifier supported"
+
+-- this is binary operations; idk if i did this right tho
+instance ToZ3 Bop where
+ toZ3Doc Plus = PP.char '+'
+ toZ3Doc Minus = PP.char '-'
+ toZ3Doc Times = PP.char '*'
+ toZ3Doc Divide = PP.text "div"
+ toZ3Doc Modulo = PP.text "mod"
+ toZ3Doc Iff = PP.text "<=>"
+ toZ3Doc Neq = PP.text "/="
+ toZ3Doc Eq = PP.char '='
+ toZ3Doc Lt = PP.char '<'
+ toZ3Doc Le = PP.text "<="
+ toZ3Doc Gt = PP.char '>'
+ toZ3Doc Ge = PP.text ">="
+ toZ3Doc Conj = PP.text "and"
+ toZ3Doc Disj = PP.text "or"
+ toZ3Doc Implies = PP.text "=>"
+
+-- need to include unary operations as well
+instance ToZ3 Uop where
+ toZ3Doc Neg = PP.char '-'
+ toZ3Doc Not = PP.text "not"
+ toZ3Doc Len = PP.text ".Length"
+ --toZ3Doc _ = error "array not supported"
+
+-- this is the main function for project
 toSMT :: Predicate -> String
-toSMT p = undefined
+toSMT p = PP.render $ PP.vcat [
+ -- declare constants and variables; without this z3 messes up
+ PP.vcat [PP.parens $ PP.text "declare-const" <+> PP.text v <+> PP.text "Int" 
+         | v <- Set.toList (getVars p)],
+ -- assert the negation here; if i don't negate then again z3 messes up
+ PP.parens $ PP.text "assert" <+> PP.parens (PP.text "not" <+> toZ3Doc p),
+ -- need to check sat, like in the lecture video
+ PP.text "(check-sat)"
+ ]
 
 -- | The name of the z3 executable. Change this to whatever it is in your system:
 --   In unix based systems, this is just "z3".
